@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BTC 5m Edge">
+<title>BTC 5m Edge</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#8b9bb4; --green:#00c853; --red:#ff5252; --yellow:#ffd54f; --blue:#448aff; }
+  * { box-sizing: border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:12px; padding-bottom:80px; }
+  h1 { font-size:1.4rem; margin-bottom:4px; }
+  .sub { color:var(--muted); font-size:0.85rem; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .metrics { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .metric.positive { background:#1b3d2f; }
+.metric.negative { background:#3d1b1b; }
+.metric .value.positive { color:var(--green); }
+.metric .value.negative { color:var(--red); }
+  .metric .label { font-size:0.7rem; color:var(--muted); }
+  .metric .value { font-size:1.1rem; font-weight:600; margin-top:2px; }
+  .decision { font-size:1.3rem; font-weight:700; text-align:center; padding:16px; border-radius:12px; margin:12px 0; }
+  .trade { background:#1b3d2f; color:var(--green); }
+  .pass { background:#3d2a1b; color:var(--yellow); }
+  .btn { background:var(--blue); color:white; border:none; border-radius:12px; padding:14px; font-size:1rem; font-weight:600; width:100%; margin-top:8px; }
+  .btn:active { opacity:0.8; }
+  input, select { width:100%; padding:10px; border-radius:10px; border:none; background:#243044; color:var(--text); margin-top:6px; font-size:1rem; }
+  label { font-size:0.8rem; color:var(--muted); }
+  .row { margin-bottom:10px; }
+  .small { font-size:0.8rem; color:var(--muted); }
+  .log-item { font-size:0.85rem; padding:6px 0; border-bottom:1px solid #2a3548; }
+</style>
+</head>
+<body>
+<h1>BTC 5m Edge</h1>
+<p class="sub">Polymarket 5-minute Up/Down decision tool</p>
+
+<div class="card">
+  <div class="metrics" id="metrics">
+    <div class="metric"><div class="label">Live BTC</div><div class="value" id="price">—</div></div>
+    <div class="metric"><div class="label">Time Left</div><div class="value" id="time">—</div></div>
+    <div class="metric"><div class="label">Prior 5m</div><div class="value" id="prior">—</div></div>
+    <div class="metric"><div class="label">Vol</div><div class="value" id="vol">—</div></div>
+  </div>
+  <div id="marketInfo" class="small" style="margin-top:10px;"></div>
+</div>
+
+<div id="decision" class="decision pass">Waiting for data…</div>
+
+<!-- Clear Up / Down Advantage -->
+<div class="card" id="edgesCard" style="display:none;">
+  <div style="text-align:center; font-size:0.9rem; color:var(--muted); margin-bottom:8px;">How much better or worse than the Polymarket price</div>
+  <div class="metrics">
+    <div class="metric" id="upEdgeBox">
+      <div class="label">UP Edge</div>
+      <div class="value" id="upEdge">—</div>
+      <div class="small" id="upPrice">Polymarket price —</div>
+    </div>
+    <div class="metric" id="downEdgeBox">
+      <div class="label">DOWN Edge</div>
+      <div class="value" id="downEdge">—</div>
+      <div class="small" id="downPrice">Polymarket price —</div>
+    </div>
+  </div>
+</div>
+
+<div id="details" class="card small"></div>
+
+<div class="card">
+  <div class="row">
+    <label>Bankroll ($)</label>
+    <input type="number" id="bankroll" value="1000" step="100">
+  </div>
+  <div class="row">
+    <label>Min edge for TRADE (e.g. 0.015 = 1.5%)</label>
+    <input type="number" id="threshold" value="0.015" step="0.002">
+  </div>
+  <div class="row">
+    <label>Override Price to Beat (0 = auto)</label>
+    <input type="number" id="ptbOverride" value="0" step="1">
+  </div>
+  <button class="btn" onclick="refresh()">Refresh Now</button>
+  <div class="small" style="text-align:center; margin-top:8px;" id="autoStatus">Auto-refresh: every 15 seconds</div>
+</div>
+
+<div class="card">
+  <strong>Paper Log</strong>
+  <div id="log"></div>
+</div>
+
+<p class="small" style="text-align:center; margin-top:20px;">
+  Add to Home Screen for app-like experience.<br>
+  Not financial advice. Most windows should be PASSes.
+</p>
+
+<script>
+const GAP_WIN = [[0,1,0.533],[1,2,0.589],[2,5,0.621],[5,10,0.661],[10,15,0.709],[15,999,0.735]];
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+async function getBTC() {
+  try {
+    const d = await fetchJSON("https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT");
+    return parseFloat(d.price);
+  } catch {
+    const d = await fetchJSON("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+    return d.bitcoin.usd;
+  }
+}
+
+async function getKlines(limit=10) {
+  return fetchJSON(`https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${limit}`);
+}
+
+function gapWin(bp) {
+  const a = Math.abs(bp);
+  for (const [lo,hi,rate] of GAP_WIN) if (lo <= a && a < hi) return rate;
+  return 0.73;
+}
+
+function leadWin(mins, bp) {
+  const a = Math.abs(bp);
+  if (mins <= 1.2) return a >= 5 ? 0.986 : a >= 2 ? 0.94 : 0.70;
+  if (mins <= 2.2) return a >= 5 ? 0.923 : a >= 2 ? 0.85 : 0.65;
+  if (mins <= 3.5) return a >= 5 ? 0.856 : a >= 2 ? 0.758 : 0.60;
+  return gapWin(bp);
+}
+
+function fee(p) { return 0.07 * p * (1 - p); }
+
+async function refresh() {
+  try {
+    const price = await getBTC();
+    const klines = await getKlines(10);
+    const now = new Date();
+    const minute = Math.floor(now.getUTCMinutes() / 5) * 5;
+    const windowStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), minute, 0));
+    const secsLeft = Math.max(0, Math.floor((windowStart.getTime() + 300000 - now.getTime()) / 1000));
+    const minsLeft = secsLeft / 60;
+
+    // Prior 5m
+    let priorDir = null, priorBp = null;
+    if (klines.length >= 6) {
+      const closes = klines.slice(-6,-1).map(k => parseFloat(k[4]));
+      const move = closes[closes.length-1] - closes[0];
+      priorBp = (move / closes[0]) * 10000;
+      priorDir = move >= 0 ? "UP" : "DOWN";
+    }
+
+    // Vol
+    let vol = null;
+    if (klines.length >= 5) {
+      const highs = klines.slice(-5).map(k => parseFloat(k[2]));
+      const lows = klines.slice(-5).map(k => parseFloat(k[3]));
+      const mid = (Math.max(...highs) + Math.min(...lows)) / 2;
+      vol = ((Math.max(...highs) - Math.min(...lows)) / mid) * 10000;
+    }
+
+    // Market
+    const ts = Math.floor(windowStart.getTime() / 1000);
+    const slug = `btc-updown-5m-${ts}`;
+    let pm = {};
+    try {
+      const markets = await fetchJSON(`https://gamma-api.polymarket.com/markets?slug=${slug}`);
+      if (markets && markets[0]) {
+        const m = markets[0];
+        const tokens = JSON.parse(m.clobTokenIds || "[]");
+        let upAsk = null, downAsk = null;
+        for (const [name, tid] of [["up", tokens[0]], ["down", tokens[1]]]) {
+          try {
+            const book = await fetchJSON(`https://clob.polymarket.com/book?token_id=${tid}`);
+            if (book.asks && book.asks[0]) {
+              const ask = parseFloat(book.asks[0].price);
+              if (name === "up") upAsk = ask; else downAsk = ask;
+            }
+          } catch {}
+        }
+        const priorClose = klines.length >= 2 ? parseFloat(klines[klines.length-2][4]) : null;
+        pm = { question: m.question, upAsk, downAsk, approxPtb: priorClose };
+      }
+    } catch {}
+
+    const ptbOverride = parseFloat(document.getElementById("ptbOverride").value) || 0;
+    const finalPtb = ptbOverride > 0 ? ptbOverride : pm.approxPtb;
+    const finalUp = pm.upAsk || 0.50;
+    const finalDown = pm.downAsk || 0.50;
+
+    // Update UI
+    document.getElementById("price").textContent = price ? `$${price.toLocaleString(undefined,{maximumFractionDigits:1})}` : "—";
+    document.getElementById("time").textContent = `${secsLeft}s`;
+    document.getElementById("prior").textContent = priorDir ? `${priorDir} ${priorBp.toFixed(1)}bp` : "—";
+    document.getElementById("vol").textContent = vol ? `${vol.toFixed(1)}bp` : "—";
+    document.getElementById("marketInfo").textContent = pm.question ? `${pm.question} | PTB ~$${finalPtb?.toFixed(1)}` : "Market loading…";
+
+    if (price && finalPtb) {
+      const gapBp = ((price - finalPtb) / finalPtb) * 10000;
+      const direction = gapBp >= 0 ? "UP" : "DOWN";
+      let fairFav = minsLeft > 4 ? gapWin(gapBp) : leadWin(minsLeft, gapBp);
+      if (priorDir && Math.abs(priorBp) > 3) {
+        if (priorDir === direction) fairFav = Math.min(0.95, fairFav + 0.015);
+        else fairFav = Math.max(0.50, fairFav - 0.01);
+      }
+      const fairUp = direction === "UP" ? fairFav : 1 - fairFav;
+      const fairDown = 1 - fairUp;
+      const upNet = fairUp - (finalUp + fee(finalUp));
+      const downNet = fairDown - (finalDown + fee(finalDown));
+
+      // Show clear Up/Down advantage
+      const edgesCard = document.getElementById("edgesCard");
+      edgesCard.style.display = "block";
+      const upEdgeEl = document.getElementById("upEdge");
+      const downEdgeEl = document.getElementById("downEdge");
+      upEdgeEl.textContent = `${(upNet*100).toFixed(1)}%`;
+      downEdgeEl.textContent = `${(downNet*100).toFixed(1)}%`;
+      document.getElementById("upPrice").textContent = `Ask ${finalUp.toFixed(2)}`;
+      document.getElementById("downPrice").textContent = `Ask ${finalDown.toFixed(2)}`;
+
+      const upBox = document.getElementById("upEdgeBox");
+      const downBox = document.getElementById("downEdgeBox");
+      upBox.className = "metric " + (upNet > 0 ? "positive" : "negative");
+      downBox.className = "metric " + (downNet > 0 ? "positive" : "negative");
+      upEdgeEl.className = "value " + (upNet > 0 ? "positive" : "negative");
+      downEdgeEl.className = "value " + (downNet > 0 ? "positive" : "negative");
+
+      const bestSide = upNet > downNet ? "UP" : "DOWN";
+      const bestNet = Math.max(upNet, downNet);
+      const bestAsk = bestSide === "UP" ? finalUp : finalDown;
+      const bestFair = bestSide === "UP" ? fairUp : fairDown;
+
+      const threshold = parseFloat(document.getElementById("threshold").value) || 0.015;
+      const bankroll = parseFloat(document.getElementById("bankroll").value) || 1000;
+      const volOk = !vol || vol >= 3.5;
+      const gapOk = Math.abs(gapBp) >= 1.5;
+      const edgeOk = bestNet >= threshold;
+      const timeOk = secsLeft > 25;
+      const trade = edgeOk && gapOk && volOk && timeOk;
+
+      const dec = document.getElementById("decision");
+      if (trade) {
+        const size = Math.max(5, Math.min(bankroll * bestNet * 0.35, bankroll * 0.015));
+        dec.className = "decision trade";
+        dec.textContent = `TRADE ${bestSide} — ${(bestNet*100).toFixed(1)}% edge`;
+        document.getElementById("details").innerHTML = `
+          Suggested size: <strong>$${size.toFixed(0)}</strong> (prefer maker)<br>
+          Fair ${bestSide}: ${(bestFair*100).toFixed(1)}% · Ask: ${bestAsk.toFixed(2)}<br>
+          Gap: ${gapBp.toFixed(1)} bp · Fair Up ${(fairUp*100).toFixed(1)}% / Down ${(fairDown*100).toFixed(1)}%
+        `;
+        // Log button
+        if (!document.getElementById("logBtn")) {
+          const b = document.createElement("button");
+          b.id = "logBtn"; b.className = "btn"; b.textContent = "Log this TRADE (paper)";
+          b.onclick = () => {
+            const logs = JSON.parse(localStorage.getItem("btc5mLog") || "[]");
+            logs.unshift({ time: new Date().toISOString().slice(11,19), side: bestSide, edge: (bestNet*100).toFixed(1)+"%", ask: bestAsk, size: size.toFixed(0) });
+            localStorage.setItem("btc5mLog", JSON.stringify(logs.slice(0,20)));
+            renderLog();
+          };
+          dec.after(b);
+        }
+      } else {
+        const reasons = [];
+        if (!edgeOk) reasons.push(`edge ${(bestNet*100).toFixed(1)}% below threshold`);
+        if (!gapOk) reasons.push(`gap only ${Math.abs(gapBp).toFixed(1)} bp`);
+        if (!volOk) reasons.push("low volatility");
+        if (!timeOk) reasons.push("too close to close");
+        dec.className = "decision pass";
+        dec.textContent = "PASS";
+        document.getElementById("details").innerHTML = reasons.join(" · ") || "No clear edge";
+        const lb = document.getElementById("logBtn"); if (lb) lb.remove();
+      }
+    }
+    renderLog();
+  } catch (e) {
+    document.getElementById("decision").textContent = "Error loading data — try again";
+    console.error(e);
+  }
+}
+
+function renderLog() {
+  const logs = JSON.parse(localStorage.getItem("btc5mLog") || "[]");
+  document.getElementById("log").innerHTML = logs.slice(0,8).map(l => 
+    `<div class="log-item">${l.time} — ${l.side} @ ${l.ask} · ${l.edge} · $${l.size}</div>`
+  ).join("") || "<div class='small'>No paper trades yet</div>";
+}
+
+// Auto-refresh every 15 seconds
+setInterval(() => {
+  refresh();
+}, 15000);
+
+// Initial load
+refresh();
+renderLog();
+</script>
+</body>
+</html>
